@@ -133,10 +133,13 @@ bool CGUIDialogAddonSettings::OnMessage(CGUIMessage& message)
       CStdString      id = message.GetStringParam(0);
       CStdString value   = message.GetStringParam(1);
       m_settings[id] = value;
-      int iControl = GetFocusedControl()->GetID();
-      CreateControls();
-      CGUIMessage msg(GUI_MSG_SETFOCUS,GetID(),iControl);
-      OnMessage(msg);
+      if (GetFocusedControl())
+      {
+        int iControl = GetFocusedControl()->GetID();
+        CreateControls();
+        CGUIMessage msg(GUI_MSG_SETFOCUS,GetID(),iControl);
+        OnMessage(msg);
+      }
       return true;
     }
   }
@@ -318,9 +321,7 @@ bool CGUIDialogAddonSettings::ShowVirtualKeyboard(int iControl)
         {
           // setup the shares
           VECSOURCES *shares = NULL;
-          if (!source || strcmpi(source, "") == 0)
-            shares = g_settings.GetSourcesFromType(type);
-          else
+          if (source && strcmpi(source, "") != 0)
             shares = g_settings.GetSourcesFromType(source);
 
           VECSOURCES localShares;
@@ -329,8 +330,7 @@ bool CGUIDialogAddonSettings::ShowVirtualKeyboard(int iControl)
             VECSOURCES networkShares;
             g_mediaManager.GetLocalDrives(localShares);
             if (!source || strcmpi(source, "local") != 0)
-              g_mediaManager.GetNetworkLocations(networkShares);
-            localShares.insert(localShares.end(), networkShares.begin(), networkShares.end());
+              g_mediaManager.GetNetworkLocations(localShares);
           }
           else // always append local drives
           {
@@ -989,7 +989,9 @@ bool CGUIDialogAddonSettings::GetCondition(const CStdString &condition, const in
 
   bool bCondition = true;
   bool bCompare = true;
+  bool bControlDependend = false;//flag if the condition depends on another control
   vector<CStdString> conditionVec;
+
   if (condition.Find("+") >= 0)
     CUtil::Tokenize(condition, conditionVec, "+");
   else
@@ -1007,6 +1009,8 @@ bool CGUIDialogAddonSettings::GetCondition(const CStdString &condition, const in
     const CGUIControl* control2 = GetControl(controlId + atoi(condVec[1]));
     if (!control2)
       continue;
+      
+    bControlDependend = true; //once we are here - this condition depends on another control
 
     CStdString value;
     switch (control2->GetControlType())
@@ -1056,6 +1060,12 @@ bool CGUIDialogAddonSettings::GetCondition(const CStdString &condition, const in
         bCondition |= (atoi(value) < atoi(condVec[2]));
     }
   }
+  
+  if (!bControlDependend)//if condition doesn't depend on another control - try if its an infobool expression
+  {
+    bCondition = g_infoManager.EvaluateBool(condition);
+  }
+  
   return bCondition;
 }
 

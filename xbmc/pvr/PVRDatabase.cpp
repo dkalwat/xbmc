@@ -32,6 +32,7 @@
 using namespace std;
 using namespace dbiplus;
 using namespace PVR;
+using namespace ADDON;
 
 CPVRDatabase::CPVRDatabase(void)
 {
@@ -62,7 +63,7 @@ bool CPVRDatabase::CreateTables()
           "idClient integer primary key, "
           "sName    varchar(64), "
           "sUid     varchar(32)"
-        ");"
+        ")"
     );
 
     CLog::Log(LOGDEBUG, "PVRDB - %s - creating table 'channels'", __FUNCTION__);
@@ -87,7 +88,7 @@ bool CPVRDatabase::CreateTables()
           "iEncryptionSystem    integer, "
 
           "idEpg                integer"
-        ");"
+        ")"
     );
     m_pDS->exec("CREATE UNIQUE INDEX idx_channels_iClientId_iUniqueId on channels(iClientId, iUniqueId);");
 
@@ -111,7 +112,7 @@ bool CPVRDatabase::CreateTables()
           "idGroup    integer primary key,"
           "bIsRadio   bool, "
           "sName      varchar(64)"
-        ");"
+        ")"
     );
     m_pDS->exec("CREATE INDEX idx_channelgroups_bIsRadio on channelgroups(bIsRadio);");
 
@@ -121,7 +122,7 @@ bool CPVRDatabase::CreateTables()
           "idChannel      integer, "
           "idGroup        integer, "
           "iChannelNumber integer"
-        ");"
+        ")"
     );
     m_pDS->exec("CREATE UNIQUE INDEX idx_idGroup_idChannel on map_channelgroups_channels(idGroup, idChannel);");
 
@@ -155,7 +156,7 @@ bool CPVRDatabase::CreateTables()
           "bPostProcess         bool, "
           "iScalingMethod       integer, "
           "iDeinterlaceMode     integer "
-        ");"
+        ")"
     );
 
     bReturn = true;
@@ -165,6 +166,19 @@ bool CPVRDatabase::CreateTables()
     CLog::Log(LOGERROR, "PVRDB - %s - unable to create TV tables:%i",
         __FUNCTION__, (int)GetLastError());
     bReturn = false;
+  }
+
+  // disable all PVR add-on when started the first time
+  ADDON::VECADDONS addons;
+  if ((bReturn = CAddonMgr::Get().GetAddons(ADDON_PVRDLL, addons, true, false)) == false)
+    CLog::Log(LOGERROR, "%s - failed to get add-ons from the add-on manager", __FUNCTION__);
+  else
+  {
+    CAddonDatabase database;
+    database.Open();
+    for (IVECADDONS it = addons.begin(); it != addons.end(); it++)
+      database.DisableAddon(it->get()->ID());
+    database.Close();
   }
 
   return bReturn;
@@ -222,6 +236,24 @@ bool CPVRDatabase::UpdateOldVersion(int iVersion)
         m_pDS->exec("DROP INDEX idx_idGroup_iChannelNumber;");
         m_pDS->exec("CREATE UNIQUE INDEX idx_channels_iClientId_iUniqueId on channels(iClientId, iUniqueId);");
         m_pDS->exec("CREATE UNIQUE INDEX idx_idGroup_idChannel on map_channelgroups_channels(idGroup, idChannel);");
+      }
+      if (iVersion < 19)
+      {
+        // bit of a hack, but we need to keep the version/contents of the non-pvr databases the same to allow clean upgrades
+        ADDON::VECADDONS addons;
+        if ((bReturn = CAddonMgr::Get().GetAddons(ADDON_PVRDLL, addons, true, false)) == false)
+          CLog::Log(LOGERROR, "%s - failed to get add-ons from the add-on manager", __FUNCTION__);
+        else
+        {
+          CAddonDatabase database;
+          database.Open();
+          for (IVECADDONS it = addons.begin(); it != addons.end(); it++)
+          {
+            if (!database.IsSystemPVRAddonEnabled(it->get()->ID()))
+              database.DisableAddon(it->get()->ID());
+          }
+          database.Close();
+        }
       }
     }
   }
@@ -659,7 +691,7 @@ int CPVRDatabase::GetGroupMembers(CPVRChannelGroup &group)
     return -1;
   }
 
-  CStdString strQuery = FormatSQL("SELECT idChannel, iChannelNumber FROM map_channelgroups_channels WHERE idGroup = %u", group.GroupID());
+  CStdString strQuery = FormatSQL("SELECT idChannel, iChannelNumber FROM map_channelgroups_channels WHERE idGroup = %u ORDER BY iChannelNumber", group.GroupID());
   if (ResultQuery(strQuery))
   {
     iReturn = 0;
@@ -713,7 +745,7 @@ bool CPVRDatabase::Persist(CPVRChannelGroup &group)
 
   if (ExecuteQuery(strQuery))
   {
-    if (group.GroupID() == 0)
+    if (group.GroupID() <= 0)
       group.m_iGroupId = (int) m_pDS->lastinsertid();
     lock.Leave();
 

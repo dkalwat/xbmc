@@ -34,6 +34,7 @@
 
 using namespace PVR;
 using namespace EPG;
+using namespace std;
 
 CPVRChannelGroupInternal::CPVRChannelGroupInternal(bool bRadio) :
   CPVRChannelGroup(bRadio)
@@ -41,6 +42,12 @@ CPVRChannelGroupInternal::CPVRChannelGroupInternal(bool bRadio) :
   m_iHiddenChannels = 0;
   m_iGroupId        = bRadio ? XBMC_INTERNAL_GROUP_RADIO : XBMC_INTERNAL_GROUP_TV;
   m_strGroupName    = g_localizeStrings.Get(bRadio ? 19216 : 19217);
+}
+
+CPVRChannelGroupInternal::CPVRChannelGroupInternal(const CPVRChannelGroup &group) :
+    CPVRChannelGroup(group)
+{
+  m_iHiddenChannels             = group.GetNumHiddenChannels();
 }
 
 int CPVRChannelGroupInternal::Load(void)
@@ -115,10 +122,12 @@ bool CPVRChannelGroupInternal::UpdateTimers(void)
   CSingleLock lock(m_critSection);
 
   /* update the timers with the new channel numbers */
-  CPVRTimers *timers = g_PVRTimers;
-  for (unsigned int ptr = 0; ptr < timers->size(); ptr++)
+  vector<CPVRTimerInfoTag *> timers;
+  g_PVRTimers->GetActiveTimers(&timers);
+
+  for (unsigned int ptr = 0; ptr < timers.size(); ptr++)
   {
-    CPVRTimerInfoTag *timer = timers->at(ptr);
+    CPVRTimerInfoTag *timer = timers.at(ptr);
     const CPVRChannel *tag = GetByClient(timer->m_iClientChannelUid, timer->m_iClientId);
     if (tag)
       timer->m_channel = tag;
@@ -178,15 +187,18 @@ bool CPVRChannelGroupInternal::RemoveFromGroup(const CPVRChannel &channel)
   {
     realChannel->SetHidden(true, true);
     ++m_iHiddenChannels;
-
-    /* renumber this list */
-    Renumber();
-
-    /* and persist */
-    return Persist();
+  }
+  else
+  {
+    realChannel->SetHidden(false, true);
+    --m_iHiddenChannels;
   }
 
-  return true;
+  /* renumber this list */
+  Renumber();
+
+  /* and persist */
+  return Persist();
 }
 
 bool CPVRChannelGroupInternal::MoveChannel(unsigned int iOldChannelNumber, unsigned int iNewChannelNumber, bool bSaveInDb /* = true */)
@@ -222,7 +234,7 @@ int CPVRChannelGroupInternal::GetMembers(CFileItemList &results, bool bGroupMemb
 
 int CPVRChannelGroupInternal::LoadFromDb(bool bCompress /* = false */)
 {
-  CPVRDatabase *database = OpenPVRDatabase();
+  CPVRDatabase *database = GetPVRDatabase();
   if (!database)
     return -1;
 
@@ -238,8 +250,6 @@ int CPVRChannelGroupInternal::LoadFromDb(bool bCompress /* = false */)
     CLog::Log(LOGINFO, "PVRChannelGroupInternal - %s - no channels in the database",
         __FUNCTION__);
   }
-
-  database->Close();
 
   SortByChannelNumber();
 
@@ -367,7 +377,7 @@ bool CPVRChannelGroupInternal::Persist(void)
   bool bHasChangedChannels = HasChangedChannels();
 
   /* open the database */
-  CPVRDatabase *database = OpenPVRDatabase();
+  CPVRDatabase *database = GetPVRDatabase();
   if (!database)
     return false;
 
@@ -409,26 +419,29 @@ bool CPVRChannelGroupInternal::Persist(void)
 
   if (bReturn)
     bReturn = CPVRChannelGroup::Persist();
-  database->Close();
 
   return bReturn;
 }
 
 bool CPVRChannelGroupInternal::CreateChannelEpgs(bool bForce /* = false */)
 {
-  CSingleLock lock(m_critSection);
-  for (unsigned int iChannelPtr = 0; iChannelPtr < size(); iChannelPtr++)
   {
-    CPVRChannel *channel = at(iChannelPtr).channel;
-    if (!channel)
-      continue;
+    CSingleLock lock(m_critSection);
+    for (unsigned int iChannelPtr = 0; iChannelPtr < size(); iChannelPtr++)
+    {
+      CPVRChannel *channel = at(iChannelPtr).channel;
+      if (!channel)
+        continue;
 
-    channel->CreateEPG(bForce);
+      channel->CreateEPG(bForce);
+    }
   }
-  lock.Leave();
 
   if (HasChangedChannels())
+  {
+    g_EpgContainer.PersistAll();
     return Persist();
+  }
 
   return true;
 }
