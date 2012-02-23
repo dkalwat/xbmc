@@ -31,7 +31,6 @@
 #include "peripherals/Peripherals.h"
 #include "peripherals/bus/PeripheralBus.h"
 #include "settings/GUISettings.h"
-#include "settings/Settings.h"
 #include "utils/log.h"
 
 #include <cec.h>
@@ -72,9 +71,7 @@ CPeripheralCecAdapter::CPeripheralCecAdapter(const PeripheralType type, const Pe
   m_bStarted(false),
   m_bHasButton(false),
   m_bIsReady(false),
-  m_strMenuLanguage("???"),
-  m_lastKeypress(0),
-  m_lastChange(VOLUME_CHANGE_NONE)
+  m_strMenuLanguage("???")
 {
   m_button.iButton = 0;
   m_button.iDuration = 0;
@@ -84,7 +81,7 @@ CPeripheralCecAdapter::CPeripheralCecAdapter(const PeripheralType type, const Pe
   {
     cec_device_type_list typeList;
     typeList.clear();
-    typeList.add(CEC_DEVICE_TYPE_RECORDING_DEVICE);
+    typeList.add(CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
     m_cecAdapter = m_dll->CECInit("XBMC", typeList);
   }
   else
@@ -131,9 +128,10 @@ void CPeripheralCecAdapter::Announce(EAnnouncementFlag flag, const char *sender,
 {
   if (flag == System && !strcmp(sender, "xbmc") && !strcmp(message, "OnQuit") && m_bIsReady)
   {
-    m_cecAdapter->SetInactiveView();
     if (GetSettingBool("cec_power_off_shutdown"))
       m_cecAdapter->StandbyDevices();
+    else if (GetSettingBool("cec_mark_inactive_shutdown"))
+      m_cecAdapter->SetInactiveView();
   }
   else if (flag == GUI && !strcmp(sender, "xbmc") && !strcmp(message, "OnScreensaverDeactivated") && GetSettingBool("cec_standby_screensaver") && m_bIsReady)
   {
@@ -247,19 +245,8 @@ void CPeripheralCecAdapter::Process(void)
   if (strPort.empty())
     return;
 
-  // set correct physical address from peripheral settings
-  int iDevice = GetSettingInt("connected_device");
-  int iHdmiPort = GetSettingInt("cec_hdmi_port");
-  SetHdmiPort(iDevice, iHdmiPort);
-  FlushLog();
-
   // open the CEC adapter
   CLog::Log(LOGDEBUG, "%s - opening a connection to the CEC adapter: %s", __FUNCTION__, strPort.c_str());
-
-  // scanning the CEC bus takes about 5 seconds, so display a notification to inform users that we're busy
-  CStdString strMessage;
-  strMessage.Format(g_localizeStrings.Get(21336), g_localizeStrings.Get(36000));
-  CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(36000), strMessage);
 
   if (!m_cecAdapter->Open(strPort.c_str(), 10000))
   {
@@ -271,6 +258,7 @@ void CPeripheralCecAdapter::Process(void)
   }
 
   CLog::Log(LOGDEBUG, "%s - connection to the CEC adapter opened", __FUNCTION__);
+
   m_bIsReady = true;
   CAnnouncementManager::AddAnnouncer(this);
 
@@ -280,6 +268,16 @@ void CPeripheralCecAdapter::Process(void)
     FlushLog();
   }
 
+  /* get the vendor id directly after connecting, because the TV might be using a non-standard CEC implementation */
+  m_cecAdapter->GetDeviceVendorId(CECDEVICE_TV);
+
+  // set correct physical address from peripheral settings
+  int iHdmiPort = GetSettingInt("cec_hdmi_port");
+  if (iHdmiPort <= 0 || iHdmiPort > 16)
+    iHdmiPort = 1;
+  m_cecAdapter->SetPhysicalAddress((uint16_t) (iHdmiPort << 12));
+  FlushLog();
+
   if (GetSettingBool("use_tv_menu_language"))
   {
     cec_menu_language language;
@@ -287,32 +285,13 @@ void CPeripheralCecAdapter::Process(void)
       SetMenuLanguage(language.language);
   }
 
-  CStdString strNotification;
-  cec_osd_name tvName = m_cecAdapter->GetDeviceOSDName(CECDEVICE_TV);
-  strNotification.Format("%s: %s", g_localizeStrings.Get(36016), tvName.name);
-
-  /* disable the mute setting when an amp is found, because the amp handles the mute setting and
-     set PCM output to 100% */
-  if (HasConnectedAudioSystem())
-  {
-    cec_osd_name ampName = m_cecAdapter->GetDeviceOSDName(CECDEVICE_AUDIOSYSTEM);
-    CLog::Log(LOGDEBUG, "%s - CEC capable amplifier found (%s). volume will be controlled on the amp", __FUNCTION__, ampName.name);
-    strNotification.AppendFormat(" - %s", ampName.name);
-
-    g_settings.m_bMute = false;
-    g_settings.m_nVolumeLevel = VOLUME_MAXIMUM;
-  }
-
   m_cecAdapter->SetOSDString(CECDEVICE_TV, CEC_DISPLAY_CONTROL_DISPLAY_FOR_DEFAULT_TIME, g_localizeStrings.Get(36016).c_str());
-  CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(36000), strNotification);
 
   while (!m_bStop)
   {
     FlushLog();
     if (!m_bStop)
       ProcessNextCommand();
-    if (!m_bStop)
-      ProcessVolumeChange();
     if (!m_bStop)
       Sleep(5);
   }
@@ -329,7 +308,7 @@ bool CPeripheralCecAdapter::PowerOnCecDevices(cec_logical_address iLogicalAddres
 
   if (m_cecAdapter && m_bIsReady)
   {
-    CLog::Log(LOGDEBUG, "%s - powering on CEC capable device with address %1x", __FUNCTION__, iLogicalAddress);
+    CLog::Log(LOGDEBUG, "%s - powering on CEC capable devices with address %1x", __FUNCTION__, iLogicalAddress);
     bReturn = m_cecAdapter->PowerOnDevices(iLogicalAddress);
   }
 
@@ -361,122 +340,18 @@ bool CPeripheralCecAdapter::SendPing(void)
   return bReturn;
 }
 
-bool CPeripheralCecAdapter::SetHdmiPort(int iDevice, int iHdmiPort)
+bool CPeripheralCecAdapter::SetHdmiPort(int iHdmiPort)
 {
   bool bReturn(false);
   if (m_cecAdapter && m_bIsReady)
   {
     if (iHdmiPort <= 0 || iHdmiPort > 16)
       iHdmiPort = 1;
-    CLog::Log(LOGDEBUG, "%s - changing active HDMI port to %d on device %d", __FUNCTION__, iHdmiPort, iDevice);
-    bReturn = m_cecAdapter->SetHDMIPort((cec_logical_address)iDevice, iHdmiPort);
+    CLog::Log(LOGDEBUG, "%s - changing active HDMI port to %d", __FUNCTION__, iHdmiPort);
+    bReturn = m_cecAdapter->SetPhysicalAddress(iHdmiPort << 12);
   }
 
   return bReturn;
-}
-
-bool CPeripheralCecAdapter::HasConnectedAudioSystem(void)
-{
-  return m_cecAdapter && m_cecAdapter->IsActiveDeviceType(CEC_DEVICE_TYPE_AUDIO_SYSTEM);
-}
-
-void CPeripheralCecAdapter::ScheduleVolumeUp(void)
-{
-  CSingleLock lock(m_critSection);
-  m_volumeChangeQueue.push(VOLUME_CHANGE_UP);
-}
-
-void CPeripheralCecAdapter::ScheduleVolumeDown(void)
-{
-  CSingleLock lock(m_critSection);
-  m_volumeChangeQueue.push(VOLUME_CHANGE_DOWN);
-}
-
-void CPeripheralCecAdapter::ScheduleMute(void)
-{
-  CSingleLock lock(m_critSection);
-  m_volumeChangeQueue.push(VOLUME_CHANGE_MUTE);
-}
-
-void CPeripheralCecAdapter::ProcessVolumeChange(void)
-{
-  bool bSendRelease(false);
-  CecVolumeChange pendingVolumeChange = VOLUME_CHANGE_NONE;
-  {
-    CSingleLock lock(m_critSection);
-    if (m_volumeChangeQueue.size() > 0)
-    {
-      /* get the first change from the queue */
-      if (pendingVolumeChange == VOLUME_CHANGE_NONE)
-      {
-        pendingVolumeChange = m_volumeChangeQueue.front();
-        m_volumeChangeQueue.pop();
-      }
-
-      /* remove all dupe entries */
-      while (m_volumeChangeQueue.size() > 0 && m_volumeChangeQueue.front() == pendingVolumeChange)
-        m_volumeChangeQueue.pop();
-
-      m_lastKeypress = XbmcThreads::SystemClockMillis();
-
-      /* only send the keypress when it hasn't been sent yet */
-      if (pendingVolumeChange != m_lastChange)
-        m_lastChange = pendingVolumeChange;
-      else
-        pendingVolumeChange = VOLUME_CHANGE_NONE;
-    }
-    else if (m_lastKeypress > 0 && m_lastKeypress + CEC_BUTTON_TIMEOUT < XbmcThreads::SystemClockMillis())
-    {
-      /* send a key release */
-      bSendRelease = true;
-      m_lastKeypress = 0;
-      m_lastChange = VOLUME_CHANGE_NONE;
-    }
-  }
-
-  switch (pendingVolumeChange)
-  {
-  case VOLUME_CHANGE_UP:
-    m_cecAdapter->SendKeypress(CECDEVICE_AUDIOSYSTEM, CEC_USER_CONTROL_CODE_VOLUME_UP, false);
-    break;
-  case VOLUME_CHANGE_DOWN:
-    m_cecAdapter->SendKeypress(CECDEVICE_AUDIOSYSTEM, CEC_USER_CONTROL_CODE_VOLUME_DOWN, false);
-    break;
-  case VOLUME_CHANGE_MUTE:
-    m_cecAdapter->SendKeypress(CECDEVICE_AUDIOSYSTEM, CEC_USER_CONTROL_CODE_MUTE, false);
-    break;
-  case VOLUME_CHANGE_NONE:
-    if (bSendRelease)
-      m_cecAdapter->SendKeyRelease(CECDEVICE_AUDIOSYSTEM, false);
-    break;
-  }
-}
-
-void CPeripheralCecAdapter::VolumeUp(void)
-{
-  if (HasConnectedAudioSystem())
-  {
-    CSingleLock lock(m_critSection);
-    m_volumeChangeQueue.push(VOLUME_CHANGE_UP);
-  }
-}
-
-void CPeripheralCecAdapter::VolumeDown(void)
-{
-  if (HasConnectedAudioSystem())
-  {
-    CSingleLock lock(m_critSection);
-    m_volumeChangeQueue.push(VOLUME_CHANGE_DOWN);
-  }
-}
-
-void CPeripheralCecAdapter::Mute(void)
-{
-  if (HasConnectedAudioSystem())
-  {
-    CSingleLock lock(m_critSection);
-    m_volumeChangeQueue.push(VOLUME_CHANGE_MUTE);
-  }
 }
 
 void CPeripheralCecAdapter::SetMenuLanguage(const char *strLanguage)
@@ -629,18 +504,16 @@ bool CPeripheralCecAdapter::GetNextCecKey(cec_keypress &key)
 
 bool CPeripheralCecAdapter::GetNextKey(void)
 {
-  bool bHasButton(false);
   CSingleLock lock(m_critSection);
   if (m_bHasButton && m_button.iDuration > 0)
-    return bHasButton;
+    return false;
 
   cec_keypress key;
   if (!m_bIsReady || !GetNextCecKey(key))
-    return bHasButton;
+    return false;
 
   CLog::Log(LOGDEBUG, "%s - received key %2x", __FUNCTION__, key.keycode);
   DWORD iButton = 0;
-  bHasButton = true;
 
   switch (key.keycode)
   {
@@ -808,24 +681,22 @@ bool CPeripheralCecAdapter::GetNextKey(void)
   case CEC_USER_CONTROL_CODE_DATA:
   case CEC_USER_CONTROL_CODE_UNKNOWN:
   default:
-    bHasButton = false;
-    return bHasButton;
+    m_bHasButton = false;
+    return false;
   }
 
-  if (!m_bHasButton && bHasButton && iButton == m_button.iButton && m_button.iDuration == 0 && key.duration > 0)
+  if (!m_bHasButton && iButton == m_button.iButton && m_button.iDuration == 0 && key.duration > 0)
   {
     /* released button of the previous keypress */
-    return m_bHasButton;
+    m_bHasButton = false;
+    return false;
   }
 
-  if (bHasButton)
-  {
-    m_bHasButton = true;
-    m_button.iDuration = key.duration;
-    m_button.iButton = iButton;
-  }
+  m_bHasButton = true;
+  m_button.iDuration = key.duration;
+  m_button.iButton = iButton;
 
-  return m_bHasButton;
+  return true;
 }
 
 WORD CPeripheralCecAdapter::GetButton(void)
@@ -862,9 +733,9 @@ void CPeripheralCecAdapter::OnSettingChanged(const CStdString &strChangedSetting
     else if (bEnabled && !m_cecAdapter && m_bStarted)
       InitialiseFeature(FEATURE_CEC);
   }
-  else if (strChangedSetting.Equals("connected_device") || strChangedSetting.Equals("cec_hdmi_port"))
+  else if (strChangedSetting.Equals("cec_hdmi_port"))
   {
-    SetHdmiPort(GetSettingInt("connected_device"), GetSettingInt("cec_hdmi_port"));
+    SetHdmiPort(GetSettingInt("cec_hdmi_port"));
   }
 }
 
