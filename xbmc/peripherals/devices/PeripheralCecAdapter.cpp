@@ -310,12 +310,25 @@ void CPeripheralCecAdapter::Process(void)
 
   delete m_queryThread;
 
-  if (m_iExitCode != EXITCODE_REBOOT && m_cecAdapter->IsLibCECActiveSource())
+  if (m_iExitCode != EXITCODE_REBOOT)
   {
-    if (m_configuration.bPowerOffOnStandby == 1)
-      m_cecAdapter->StandbyDevices();
-    else if (m_configuration.bSendInactiveSource == 1)
-      m_cecAdapter->SetInactiveView();
+    if (m_cecAdapter->IsLibCECActiveSource())
+    {
+      if (!m_configuration.powerOffDevices.IsEmpty())
+      {
+        CLog::Log(LOGDEBUG, "%s - sending standby commands", __FUNCTION__);
+        m_cecAdapter->StandbyDevices();
+      }
+      else if (m_configuration.bSendInactiveSource == 1)
+      {
+        CLog::Log(LOGDEBUG, "%s - sending inactive source commands", __FUNCTION__);
+        m_cecAdapter->SetInactiveView();
+      }
+    }
+    else
+    {
+      CLog::Log(LOGDEBUG, "%s - XBMC is not the active source, not sending any standby commands", __FUNCTION__);
+    }
   }
 
   m_cecAdapter->Close();
